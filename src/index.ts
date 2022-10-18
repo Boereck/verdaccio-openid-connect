@@ -33,6 +33,8 @@ type OidcPluginConfig = {
   scope: string;
   usernameClaim?: string;
   rolesClaim?: string;
+  audienceClaim?: string;
+  audience?: string;
 
   redisUri?: string;
   fsSessionStorePath?: string;
@@ -198,6 +200,33 @@ export default class OidcPlugin
 
     return username;
   }
+  
+  private getAudience(tokenSet: TokenSet): string[] {
+    const {audienceClaim = 'aud'} = this.options.config;
+
+    const audience = tokenSet.claims()[audienceClaim];
+    
+    const result = this.convertAudience(audience);
+    if (result !== null) {
+		return result;
+	} else {
+		throw new Error(
+        `Missing audience claim '${audienceClaim}'. Available claims: ${JSON.stringify(
+          Object.keys(tokenSet.claims()),
+        )}`,
+      );
+	}
+  }
+
+  private convertAudience(audience: any): string[] | null {
+	if (typeof audience === 'string') {
+      return [audience];
+    } else if (Array.isArray(audience) && audience.every(it => typeof it === 'string')) {
+		return audience;
+	} else {
+		return null;
+	}
+  }
 
   private getRoles(tokenSet: TokenSet): string[] {
     const {rolesClaim} = this.options.config;
@@ -325,7 +354,7 @@ export default class OidcPlugin
       }
 
       const jwtRaw = authorizationParts[1];
-      let jwtPayload = undefined;
+      let jwtPayload : string | jwt.JwtPayload | undefined = undefined;
 
       try {
         jwtPayload = jwt.verify(jwtRaw, this.options.config.secret);
@@ -394,6 +423,25 @@ export default class OidcPlugin
             );
           }
         }
+        
+        const {audienceClaim = 'aud', audience} = this.options.config;
+        if(audience && typeof jwtPayload === 'object') {
+          const tokenAudience = this.convertAudience(jwtPayload[audienceClaim])
+          if (tokenAudience === null) {
+            return next(
+              new Error(
+                'income token does not contain a valid audience claim',
+              )
+            )
+          }
+          if (!tokenAudience.includes(audience)) {
+            return next(
+              new Error(
+                'income token contains [audience] claim that does not contain expected claim',
+              )
+            )
+          }
+        }
 
         req.remote_user = helpers.createRemoteUser(name, groupsWithoutUser);
         next();
@@ -437,6 +485,14 @@ export default class OidcPlugin
               this.unauthorized(res, 'Access token is not issued for the user trying to log in.');
               return;
             }
+            
+            const expectedAudience = this.options.config.audience;
+            if(expectedAudience) {
+	            const tokenAudience = this.getAudience(tokenSet);
+				if(!tokenAudience.includes(expectedAudience)) {
+					this.unauthorized(res, 'Access token is not issued for the target audience trying to log in.');
+				}
+			}
 
             const sessionId = await nanoid();
             const {npmToken} = await this.saveSessionAndCreateTokens(sessionId, tokenSet, auth);
